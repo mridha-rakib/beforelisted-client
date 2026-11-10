@@ -1,0 +1,244 @@
+"use client";
+
+import { Suspense, useState } from "react";
+import { useRouter, useSearchParams } from "next/navigation";
+import Image from "next/image";
+import Link from "next/link";
+
+const API_BASE_URL = process.env.NEXT_PUBLIC_API_BASE_URL;
+
+function ResetPasswordPageInner() {
+  const router = useRouter();
+  const searchParams = useSearchParams();
+  const email = searchParams.get("email") || "";
+  const otp = searchParams.get("otp") || "";
+  const [showNewPassword, setShowNewPassword] = useState(false);
+  const [showConfirmPassword, setShowConfirmPassword] = useState(false);
+  const [form, setForm] = useState({
+    newPassword: "",
+    confirmPassword: "",
+  });
+  const [statusMessage, setStatusMessage] = useState<{
+    type: "success" | "error";
+    message: string;
+  } | null>(null);
+  const [loading, setLoading] = useState(false);
+
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setStatusMessage(null);
+
+    if (!email || !otp) {
+      setStatusMessage({
+        type: "error",
+        message: "Missing email or OTP. Please restart the reset flow.",
+      });
+      return;
+    }
+
+    if (form.newPassword !== form.confirmPassword) {
+      setStatusMessage({ type: "error", message: "Passwords do not match." });
+      return;
+    }
+
+    try {
+      setLoading(true);
+      const res = await fetch(`${API_BASE_URL}/auth/reset-password`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          email,
+          otp,
+          newPassword: form.newPassword,
+        }),
+      });
+
+      const data = await res.json();
+      if (!res.ok || !data?.success) {
+        throw new Error(
+          data?.message ||
+            "Unable to reset password right now. Please try again."
+        );
+      }
+
+      setStatusMessage({
+        type: "success",
+        message: data?.message || "Password reset successful.",
+      });
+      router.replace("/signin");
+    } catch (err) {
+      const message =
+        err instanceof Error
+          ? err.message
+          : "Unable to reset password right now. Please try again.";
+      setStatusMessage({ type: "error", message });
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return (
+    <div className="w-full">
+      {/* Logo */}
+      <div className="w-full flex mb-5 justify-center">
+        <Link href="/">
+          <Image
+            className="w-[120px] md:w-[150px] lg:w-[180px] h-auto"
+            src="/Logo_1.svg"
+            alt="Logo"
+            width={180}
+            height={150}
+          />
+        </Link>
+      </div>
+
+      {/* Title */}
+      <h2 className="text-2xl font-semibold text-center text-text-primary mb-1">
+        Set new password
+      </h2>
+      <p className="text-center text-text-secondary mb-6 text-sm sm:text-base">
+        Set a new password and continue your journey
+      </p>
+
+      {/* Form */}
+      <form onSubmit={handleSubmit} className="space-y-6">
+        {/* New Password */}
+        <div>
+          <label className="block text-sm font-semibold text-text-tertiary mb-2">
+            New Password
+          </label>
+          <div className="flex items-center bg-surface-secondary border border-border-secondary rounded-xl px-4 py-3 sm:py-3.5">
+            <Image
+              src="/icons/square-lock-01.svg"
+              alt="lock icon"
+              width={20}
+              height={20}
+              className="w-5 h-5 mr-2"
+            />
+            <input
+              type={showNewPassword ? "text" : "password"}
+              placeholder="Enter password"
+              value={form.newPassword}
+              onChange={(e) =>
+                setForm((prev) => ({ ...prev, newPassword: e.target.value }))
+              }
+              required
+              className="flex-1 bg-transparent focus:outline-none text-text-secondary text-sm sm:text-base"
+            />
+            <Image
+              src={
+                showNewPassword ? "/icons/view-closed.svg" : "/icons/view.svg"
+              }
+              alt="toggle password"
+              width={20}
+              height={20}
+              onClick={() => setShowNewPassword((p) => !p)}
+              className="w-5 h-5 opacity-70 cursor-pointer ml-2 hover:opacity-100 transition"
+            />
+          </div>
+        </div>
+
+        {/* Confirm Password */}
+        <div>
+          <label className="block text-sm font-semibold text-text-tertiary mb-2">
+            Confirm Password
+          </label>
+          <div className="flex items-center bg-surface-secondary border border-border-secondary rounded-xl px-4 py-3 sm:py-3.5">
+            <Image
+              src="/icons/square-lock-01.svg"
+              alt="lock icon"
+              width={20}
+              height={20}
+              className="w-5 h-5 mr-2"
+            />
+            <input
+              type={showConfirmPassword ? "text" : "password"}
+              placeholder="Retype password"
+              value={form.confirmPassword}
+              onChange={(e) =>
+                setForm((prev) => ({
+                  ...prev,
+                  confirmPassword: e.target.value,
+                }))
+              }
+              required
+              className="flex-1 bg-transparent focus:outline-none text-text-secondary text-sm sm:text-base"
+            />
+            <Image
+              src={
+                showConfirmPassword
+                  ? "/icons/view-closed.svg"
+                  : "/icons/view.svg"
+              }
+              alt="toggle confirm password"
+              width={20}
+              height={20}
+              onClick={() => setShowConfirmPassword((p) => !p)}
+              className="w-5 h-5 opacity-70 cursor-pointer ml-2 hover:opacity-100 transition"
+            />
+          </div>
+        </div>
+
+        {statusMessage && (
+          <p
+            className={`text-sm sm:text-base ${
+              statusMessage.type === "error" ? "text-red-600" : "text-green-600"
+            }`}
+          >
+            {statusMessage.message}
+          </p>
+        )}
+
+        {/* Submit */}
+        <button
+          type="submit"
+          disabled={loading}
+          className="
+            w-full bg-action hover:bg-action-hover
+            text-text-inverted font-semibold
+            py-3 sm:py-3.5 rounded-lg transition
+            disabled:opacity-60
+          "
+        >
+          {loading ? "Updating..." : "Next"}
+        </button>
+
+        {/* Resend + Back */}
+        <div className="flex flex-col items-center gap-3 text-sm sm:text-base mt-1">
+          <p className="text-text-tertiary">
+            Don’t receive OTP?{" "}
+            <button
+              type="button"
+              className="text-action hover:text-action-hover font-semibold"
+            >
+              Resend again
+            </button>
+          </p>
+
+          <button
+            type="button"
+            onClick={() => router.push("/signin")}
+            className="flex items-center gap-2 text-text-tertiary hover:text-action transition"
+          >
+            <Image
+              src="/icons/arrow-left-01.svg"
+              alt="Back icon"
+              width={20}
+              height={20}
+              className="w-5 h-5"
+            />
+            Back to Login
+          </button>
+        </div>
+      </form>
+    </div>
+  );
+}
+
+export default function ResetPasswordPage() {
+  return (
+    <Suspense fallback={<div className="p-4 text-center">Loading...</div>}>
+      <ResetPasswordPageInner />
+    </Suspense>
+  );
+}

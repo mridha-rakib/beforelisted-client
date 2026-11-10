@@ -1,0 +1,168 @@
+@import "tailwindcss";
+@import "leaflet/dist/leaflet.css";
+
+:root {
+  --background: #ffffff;
+  --foreground: #171717;
+}
+
+@theme {
+  /* 🎨 Figma-based color tokens */
+  --color-action: #1890ff;
+  --color-action-hover: #1166b5;
+  --color-icon-action: #1890ff;
+  --color-icon-hover: #1166b5;
+
+  --color-text-primary: #212121;
+  --color-text-secondary: #717171;
+  --color-text-tertiary: #888888;
+  --color-text-inverted: #ffffff;
+
+  --color-border-secondary: #ededed;
+
+  --color-surface-secondary: #f5f5f5;
+  --color-surface-action: #1890ff;
+
+  --color-black: #000000;
+  --color-white: #ffffff;
+}
+
+@layer base {
+  html,
+  body {
+    @apply bg-white text-[color:var(--color-text-primary)] scroll-smooth;
+  }
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --font-sans: var(--font-geist-sans);
+  --font-mono: var(--font-geist-mono);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --background: #0a0a0a;
+    --foreground: #ededed;
+  }
+}
+
+body {
+  background: var(--background);
+  color: var(--foreground);
+  font-family: Arial, Helvetica, sans-serif;
+}
+
+@layer components {
+  .faq-answer {
+    @apply leading-relaxed;
+  }
+
+  .faq-answer p {
+    @apply mt-2;
+  }
+
+  .faq-answer h1 {
+    @apply text-2xl font-semibold mt-3;
+  }
+
+  .faq-answer h2 {
+    @apply text-xl font-semibold mt-3;
+  }
+
+  .faq-answer h3 {
+    @apply text-lg font-semibold mt-3;
+  }
+
+  .faq-answer ol {
+    @apply list-decimal pl-6 mt-2;
+  }
+
+  .faq-answer ul {
+    @apply list-disc pl-6 mt-2;
+  }
+
+  .faq-answer b,
+  .faq-answer strong {
+    @apply font-semibold;
+  }
+
+  .faq-answer i,
+  .faq-answer em {
+    @apply italic;
+  }
+
+  .faq-answer u {
+    @apply underline;
+  }
+
+  .faq-answer li {
+    @apply mt-1;
+  }
+
+  .faq-answer a {
+    @apply text-[color:var(--color-action)] underline underline-offset-2;
+  }
+}
+
+/* All Market Offer toggle switch (replaces native checkbox styling) */
+.all-market-switch {
+  position: relative;
+  display: inline-block;
+  width: 1.4em;
+  height: 0.8em;
+  font-size: 17px;
+  vertical-align: middle;
+}
+
+.all-market-switch input {
+  opacity: 0;
+  width: 0;
+  height: 0;
+}
+
+.all-market-switch .slider {
+  position: absolute;
+  cursor: pointer;
+  inset: 0;
+  background: #9fccfa;
+  border-radius: 50px;
+  transition: all 0.4s cubic-bezier(0.175, 0.885, 0.32, 1.275);
+}
+
+.all-market-switch .slider::before {
+  position: absolute;
+  content: "";
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 0.8em;
+  width: 0.8em;
+  inset: 0;
+  background-color: white;
+  border-radius: 50px;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.4);
+  transition: all 0.4s cubic-bezier(0.175, 0.885, 0.32, 1.275);
+}
+
+.all-market-switch input:checked + .slider {
+  background: #0974f1;
+}
+
+.all-market-switch input:focus + .slider {
+  box-shadow: 0 0 1px #0974f1;
+}
+
+.all-market-switch input:checked + .slider::before {
+  transform: translateX(0.6em);
+}
+
+.all-market-switch input:disabled + .slider {
+  cursor: not-allowed;
+  background: #d1d5db;
+}
+
+.all-market-switch input:disabled:checked + .slider {
+  background: #9ca3af;
+}

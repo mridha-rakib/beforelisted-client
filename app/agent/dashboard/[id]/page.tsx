@@ -1,0 +1,1668 @@
+"use client";
+
+import Image from "next/image";
+import { useEffect, useMemo, useState } from "react";
+import { useParams, useRouter, useSearchParams } from "next/navigation";
+import { useDispatch, useSelector } from "react-redux";
+import {
+  ArrowLeft,
+  ChevronLeft,
+  ChevronRight,
+  Mail,
+  Phone,
+  User,
+} from "lucide-react";
+import RenterPreferenceView from "@/components/RenterPreferenceView";
+import OpportunityDetailsTextarea from "@/components/agent/OpportunityDetailsTextarea";
+import type { AppDispatch, RootState } from "@/store/store";
+import {
+  API_BASE_URL,
+  ApiAgentRequestsResponse,
+  NormalizedAgentRequest,
+  cacheAgentRequests,
+  normalizeAgentRequest,
+  readCachedAgentRequests,
+} from "../utils";
+import { selectAgentHasGrantAccess } from "@/store/slices/authSlice";
+import { fetchAgentProfile } from "@/store/slices/agentProfileSlice";
+import { isUpcomingScope } from "@/lib/scope";
+import {
+  buildMatchSearchPayload,
+  getAgentRequestHref,
+  isCurrentAgentRegisteredForRequest,
+  matchesAgentFilters,
+  readStoredAgentListState,
+} from "../../requestNavigation";
+
+const NAVIGATION_STORAGE_KEY = "agent-dashboard-navigation";
+const ARCHIVE_NAVIGATION_STORAGE_KEY = "agent-archived-navigation";
+const NAVIGATION_LIMIT_FALLBACK = 10;
+type RepresentationType = "owner_representation" | "renter_representation";
+type OwnerRepresentationRegisteredAgent = NonNullable<
+  NormalizedAgentRequest["raw"]["ownerRepresentationRegisteredAgent"]
+>;
+const OPPORTUNITY_DETAILS_MAX_LENGTH = 350;
+const RISKY_OPPORTUNITY_DETAIL_PHRASES = [
+  "I have a listing",
+  "I have",
+  "exclusive",
+  "my owner",
+  "my landlord",
+  "my building",
+  "private listing",
+  "only through me",
+  "off-market listing",
+  "guaranteed",
+  "no one else has access",
+];
+const OPPORTUNITY_DETAILS_RISKY_WORDING_MESSAGE =
+  "Please revise this wording to use neutral, factual language. The message should not suggest that you represent the owner unless that has been properly selected and disclosed.";
+
+const riskyOpportunityDetailsPattern = () =>
+  new RegExp(
+    `(${RISKY_OPPORTUNITY_DETAIL_PHRASES.map(escapeRegExp).join("|")})`,
+    "gi",
+  );
+
+const hasRiskyOpportunityDetailsWording = (value: string) =>
+  riskyOpportunityDetailsPattern().test(value);
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+const opportunityDetailsHelperText: Record<RepresentationType, string> = {
+  renter_representation:
+    "Included in the email to the renter and visible to the registered agent. Kindly use neutral, factual details only (apartment features, address, cross streets, viewing times, next steps).",
+  owner_representation:
+    "Included in the email to the registered agent. Kindly use neutral, factual details only (apartment features, address, cross streets, viewing times, next steps).",
+};
+
+const opportunityDetailsPlaceholder: Record<RepresentationType, string> = {
+  renter_representation: `e.g. I found an upcoming rental that may work for you: E 87th St between First & Second Ave, large beautiful 1BR, $3,600, Sep 1 start, great light, elevator, laundry in building. Video available. Reply all if interested.`,
+  owner_representation: `e.g. I have an exclusive coming up that can fit your client. Large one bedroom, West 72nd Street between Broadway and Amsterdam Avenue, dishwasher, high ceilings, $3,800, September 1 start date, elevator and laundry building. Reach out for showing times.`,
+};
+
+const BROKER_FEE_OPTIONS = ["One Month Rent", "9% Annual Rent", "10% Annual Rent", "11% Annual Rent", "12% Annual Rent", "13% Annual Rent", "14% Annual Rent", "15% Annual Rent", "Talk to Renter First"] as const;
+
+const unitFeatureLabels: Record<string, string> = {
+  laundryInUnit: "Laundry in unit",
+  privateOutdoorSpace: "Private outdoor space",
+  dishwasher: "Dishwasher",
+};
+
+const buildingFeatureLabels: Record<string, string> = {
+  doorman: "Doorman",
+  elevator: "Elevator",
+  laundryInBuilding: "Laundry in Building",
+};
+
+const petPolicyLabels: Record<string, string> = {
+  catsAllowed: "Cats allowed",
+  dogsAllowed: "Dogs allowed",
+};
+
+const guarantorLabels: Record<string, string> = {
+  personalGuarantor: "Personal guarantor",
+  thirdPartyGuarantor: "Third party guarantor",
+};
+
+const formatDate = (date?: string) =>
+  date
+    ? new Date(date).toLocaleDateString("en-US", {
+        month: "short",
+        day: "numeric",
+        year: "numeric",
+      })
+    : "Not specified";
+
+const formatFeatureGroup = (
+  values: Record<string, boolean> | undefined,
+  labels: Record<string, string>,
+) =>
+  Object.entries(values || {})
+    .filter(([, value]) => value)
+    .map(([key]) => labels[key] || key);
+
+export default function AgentRenterRequestDetailsPage() {
+  const params = useParams();
+  const router = useRouter();
+  const searchParams = useSearchParams();
+  const dispatch = useDispatch<AppDispatch>();
+  const accessToken = useSelector((state: RootState) => state.auth.accessToken);
+  const currentUserId = useSelector((state: RootState) => state.auth.user?._id);
+  const hasGrantAccess = useSelector(selectAgentHasGrantAccess);
+
+  const requestId = params?.id as string | undefined;
+  const isArchiveContext = searchParams.get("from") === "archive";
+  const isMatchResultsContext = searchParams.get("from") === "matches";
+
+  const [request, setRequest] = useState<NormalizedAgentRequest | null>(null);
+  const [isLoading, setIsLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [isSubmitting, setIsSubmitting] = useState(false);
+  const [statusMessage, setStatusMessage] = useState<{
+    type: "success" | "error";
+    message: string;
+  } | null>(null);
+  const [isConfirmOpen, setIsConfirmOpen] = useState(false);
+  const [isConfirmChecked, setIsConfirmChecked] = useState(false);
+  const [isRepresentationOpen, setIsRepresentationOpen] = useState(false);
+  const [selectedRepresentationType, setSelectedRepresentationType] = useState<
+    RepresentationType | ""
+  >("");
+  const [opportunityDetails, setOpportunityDetails] = useState("");
+  const [brokerFee, setBrokerFee] = useState("");
+  const [navigationTargets, setNavigationTargets] = useState<{
+    previousHref: string | null;
+    nextHref: string | null;
+  }>({
+    previousHref: null,
+    nextHref: null,
+  });
+  const [isResolvingNavigation, setIsResolvingNavigation] = useState(false);
+  const [mutatingAllMarketOffer, setMutatingAllMarketOffer] = useState(false);
+  const [isAllMarketOfferTooltipOpen, setIsAllMarketOfferTooltipOpen] =
+    useState(false);
+
+  useEffect(() => {
+    if (!accessToken) return;
+    dispatch(fetchAgentProfile());
+  }, [accessToken, dispatch]);
+
+  useEffect(() => {
+    if (!requestId) return;
+    const controller = new AbortController();
+    // A detail page opened from Find Matches must retain the request's live
+    // scope, just like the results table. Match history is available
+    // separately as `matchScopeLabel` for the views that need it.
+    const applyScopeForView = (item: NormalizedAgentRequest) => item;
+
+    const fetchRequest = async () => {
+      setIsLoading(true);
+      setError(null);
+
+      try {
+        const cached = readCachedAgentRequests().find(
+          (item) => item.id === requestId,
+        );
+        if (cached) {
+          setRequest(applyScopeForView(cached));
+        }
+
+        const headers: Record<string, string> = {
+          "Content-Type": "application/json",
+        };
+        if (accessToken) headers.Authorization = `Bearer ${accessToken}`;
+
+        const response = await fetch(
+          `${API_BASE_URL}/pre-market/${requestId}`,
+          {
+            method: "GET",
+            headers,
+            signal: controller.signal,
+          },
+        );
+
+        const data = await response.json().catch(
+          () =>
+            ({}) as {
+              success?: boolean;
+              message?: string;
+              data?: {
+                registeredAgentInfo?: NormalizedAgentRequest["raw"]["ownerRepresentationRegisteredAgent"];
+              };
+            },
+        );
+
+        if (!response.ok || data?.success === false) {
+          throw new Error(
+            data?.message ||
+              "We couldn't load this request right now. Please try again.",
+          );
+        }
+
+        const found = data?.data
+          ? applyScopeForView(normalizeAgentRequest(data.data))
+          : null;
+        if (!found) {
+          throw new Error("We couldn't find this request.");
+        }
+
+        setRequest(found);
+      } catch (err) {
+        if (controller.signal.aborted) return;
+        const message =
+          err instanceof Error
+            ? err.message
+            : "We couldn't load this request right now. Please try again.";
+        setError(message);
+        setRequest(null);
+      } finally {
+        if (!controller.signal.aborted) setIsLoading(false);
+      }
+    };
+
+    fetchRequest();
+
+    return () => controller.abort();
+  }, [accessToken, isMatchResultsContext, requestId]);
+
+  useEffect(() => {
+    if (!requestId) return;
+
+    const controller = new AbortController();
+
+    const resolveNavigation = async () => {
+      const storageKey = isArchiveContext
+        ? ARCHIVE_NAVIGATION_STORAGE_KEY
+        : NAVIGATION_STORAGE_KEY;
+      const storedState = readStoredAgentListState(storageKey);
+      const useStoredContext =
+        storedState?.itemIds?.some((itemId) => itemId === requestId) ?? false;
+      const storedMatchSearchFilters =
+        !isArchiveContext && useStoredContext
+          ? (storedState?.matchSearchFilters ?? null)
+          : null;
+      const useStoredMatchContext =
+        Boolean(storedState?.isMatchResultsMode) &&
+        Boolean(storedMatchSearchFilters);
+      const pageLimit =
+        useStoredContext && storedState?.limit
+          ? storedState.limit
+          : NAVIGATION_LIMIT_FALLBACK;
+      const headers: Record<string, string> = {
+        "Content-Type": "application/json",
+      };
+      if (accessToken) headers.Authorization = `Bearer ${accessToken}`;
+
+      const matchesCurrentRequest = (item: NormalizedAgentRequest) =>
+        [item.id, item.raw?._id, item.raw?.id, item.raw?.requestId].some(
+          (id) => id === requestId,
+        );
+
+      try {
+        setIsResolvingNavigation(true);
+        let previousHref: string | null = null;
+        let nextHref: string | null = null;
+        let foundCurrent = false;
+        let pageToFetch = 1;
+        let totalPages = 1;
+
+        while (pageToFetch <= totalPages && !nextHref) {
+          const params = new URLSearchParams({
+            page: String(pageToFetch),
+            limit: String(pageLimit),
+          });
+
+          const endpoint = isArchiveContext
+            ? "/pre-market/agent/archived-requests"
+            : "/pre-market/all";
+          const response =
+            useStoredMatchContext && storedMatchSearchFilters
+              ? await fetch(`${API_BASE_URL}/pre-market/agent/match-search`, {
+                  method: "POST",
+                  headers,
+                  signal: controller.signal,
+                  body: JSON.stringify({
+                    ...buildMatchSearchPayload(storedMatchSearchFilters),
+                    page: pageToFetch,
+                    limit: pageLimit,
+                  }),
+                })
+              : await fetch(`${API_BASE_URL}${endpoint}?${params.toString()}`, {
+                  method: "GET",
+                  headers,
+                  signal: controller.signal,
+                });
+
+          const data: ApiAgentRequestsResponse = await response
+            .json()
+            .catch(() => ({}) as ApiAgentRequestsResponse);
+
+          if (!response.ok || data?.success === false) {
+            throw new Error(
+              data?.message ||
+                "We couldn't load nearby requests right now. Please try again.",
+            );
+          }
+
+          const normalized = (data.data ?? []).map(normalizeAgentRequest);
+          cacheAgentRequests(normalized);
+          totalPages = Math.max(1, data.pagination?.totalPages ?? totalPages);
+
+          const visibleRequests = useStoredMatchContext
+            ? normalized
+            : !isArchiveContext && useStoredContext && storedState
+              ? normalized.filter((item) =>
+                  matchesAgentFilters(
+                    item.raw,
+                    storedState.filters,
+                    storedState.showOwnReferrals,
+                    currentUserId,
+                  ),
+                )
+              : normalized;
+
+          for (const item of visibleRequests) {
+            const itemHref = isArchiveContext
+              ? getAgentRequestHref(item.raw, item.id, currentUserId)
+              : isMatchResultsContext
+                ? `/agent/dashboard/${item.id}?from=matches`
+                : `/agent/dashboard/${item.id}`;
+            if (foundCurrent) {
+              nextHref = itemHref;
+              break;
+            }
+
+            if (matchesCurrentRequest(item)) {
+              foundCurrent = true;
+            } else {
+              previousHref = itemHref;
+            }
+          }
+
+          pageToFetch += 1;
+        }
+
+        if (!controller.signal.aborted) {
+          setNavigationTargets(
+            foundCurrent
+              ? { previousHref, nextHref }
+              : { previousHref: null, nextHref: null },
+          );
+        }
+      } catch {
+        if (!controller.signal.aborted) {
+          setNavigationTargets({ previousHref: null, nextHref: null });
+        }
+      } finally {
+        if (!controller.signal.aborted) {
+          setIsResolvingNavigation(false);
+        }
+      }
+    };
+
+    resolveNavigation();
+
+    return () => controller.abort();
+  }, [
+    accessToken,
+    currentUserId,
+    isArchiveContext,
+    isMatchResultsContext,
+    requestId,
+  ]);
+
+  const {
+    movingDateRange,
+    priceRange,
+    locations,
+    bedrooms,
+    bathrooms,
+    unitFeatures,
+    buildingFeatures,
+    petPolicy,
+    guarantorRequired,
+    preferences,
+    renterInfo,
+  } = request?.raw || {};
+
+  const unitFeaturesList = useMemo(
+    () => formatFeatureGroup(unitFeatures, unitFeatureLabels),
+    [unitFeatures],
+  );
+  const buildingFeaturesList = useMemo(
+    () => formatFeatureGroup(buildingFeatures, buildingFeatureLabels),
+    [buildingFeatures],
+  );
+  const petPolicyList = useMemo(
+    () => formatFeatureGroup(petPolicy, petPolicyLabels),
+    [petPolicy],
+  );
+  const guarantorList = useMemo(
+    () => formatFeatureGroup(guarantorRequired, guarantorLabels),
+    [guarantorRequired],
+  );
+
+  const renterPreferenceData = useMemo(() => {
+    const boroughValue = locations?.[0]?.borough || "Not specified";
+    const neighborhoodsList =
+      locations
+        ?.flatMap((loc) => loc.neighborhoods || [])
+        ?.filter((n): n is string => Boolean(n)) || [];
+
+    const minPrice =
+      priceRange?.min != null
+        ? new Intl.NumberFormat("en-US", {
+            style: "currency",
+            currency: "USD",
+            maximumFractionDigits: 0,
+          }).format(priceRange.min)
+        : "Not specified";
+
+    const maxPrice =
+      priceRange?.max != null
+        ? new Intl.NumberFormat("en-US", {
+            style: "currency",
+            currency: "USD",
+            maximumFractionDigits: 0,
+          }).format(priceRange.max)
+        : "Not specified";
+
+    const normalizeBedroom = (value: string) => {
+      if (!value) return "";
+      if (value.toLowerCase() === "studio") return "Studio";
+      if (/br/i.test(value)) return value.toUpperCase();
+      const asNumber = parseInt(value, 10);
+      return Number.isNaN(asNumber) ? value : `${asNumber}BR`;
+    };
+
+    const normalizeBathroom = (value: string) => {
+      if (!value) return "";
+      if (value.includes("+")) return value;
+      const asNumber = parseInt(value, 10);
+      if (!Number.isNaN(asNumber)) {
+        return asNumber >= 4 ? "4+" : String(asNumber);
+      }
+      return value;
+    };
+
+    const bedroomValues =
+      bedrooms
+        ?.map((value) => normalizeBedroom(value))
+        .filter((value): value is string => Boolean(value)) || [];
+
+    const bathroomValues =
+      bathrooms
+        ?.map((value) => normalizeBathroom(value))
+        .filter((value): value is string => Boolean(value)) || [];
+
+    return {
+      borough: boroughValue,
+      neighborhoods:
+        neighborhoodsList.length > 0 ? neighborhoodsList : ["Not specified"],
+      minPrice,
+      maxPrice,
+      earliestDate: formatDate(movingDateRange?.earliest),
+      latestDate: formatDate(movingDateRange?.latest),
+      bedrooms: bedroomValues,
+      bathrooms: bathroomValues,
+      unitFeatures: unitFeaturesList,
+      buildingFeatures: buildingFeaturesList,
+      petPolicy: petPolicyList,
+      guarantor: guarantorList,
+      preferences: preferences ?? [],
+    };
+  }, [
+    buildingFeaturesList,
+    bedrooms,
+    guarantorList,
+    locations,
+    movingDateRange?.earliest,
+    movingDateRange?.latest,
+    petPolicyList,
+    preferences,
+    priceRange?.max,
+    priceRange?.min,
+    unitFeaturesList,
+    bathrooms,
+  ]);
+
+  const renterContact = useMemo(() => {
+    if (!renterInfo) return null;
+    const isOwnerRepresentationView =
+      request?.ownerRepresentationSelected ||
+      request?.representation_type === "owner_representation" ||
+      request?.raw?.ownerRepresentationSelected ||
+      request?.raw?.representation_type === "owner_representation";
+
+    if (isOwnerRepresentationView) return null;
+
+    const candidateReferrerIds = [
+      request?.raw?.referrerId,
+      request?.raw?.referralAgentId,
+      request?.raw?.referralInfo?.referrer?.referrerId,
+      request?.raw?.referralInfo?.referrer?.id,
+      renterInfo?.referralInfo?.referrerId,
+    ]
+      .filter((value): value is string => Boolean(value))
+      .map((value) => value.trim());
+
+    const canViewContact =
+      !!currentUserId &&
+      candidateReferrerIds.some((value) => value === currentUserId);
+
+    if (!canViewContact) return null;
+
+    return {
+      name: renterInfo.renterName || renterInfo.fullName || "Unknown renter",
+      email: renterInfo.renterEmail || renterInfo.email || "Not provided",
+      phone: renterInfo.renterPhone || renterInfo.phoneNumber || "Not provided",
+      registrationType: renterInfo.registrationType || "Not specified",
+    };
+  }, [currentUserId, renterInfo, request]);
+  const ownerRepresentationRegisteredAgent =
+    request?.raw?.ownerRepresentationRegisteredAgent;
+  const isRegisteredAgentForRequest = isCurrentAgentRegisteredForRequest(
+    request?.raw,
+    currentUserId ?? null,
+  );
+  const ownerRepresentationMatches = isRegisteredAgentForRequest
+    ? (request?.raw?.ownerRepresentationMatches ?? [])
+    : [];
+  const canRequestAccess =
+    request?.raw?.canRequestAccess &&
+    (request?.raw?.status === "Available" || "available");
+  const listingStatus = request?.raw?.listingStatus || "";
+  const isUpcomingRequest = isUpcomingScope(
+    request?.raw?.scope ?? request?.scopeLabel,
+  );
+  const isListingMatched = listingStatus.toLowerCase() === "matched";
+  const grantAccessEnabled = hasGrantAccess === true;
+  const grantAccessStatus = request?.raw?.grantAccessStatus?.toLowerCase();
+  const isRenterRepresentationMatched =
+    !isUpcomingRequest &&
+    (isListingMatched ||
+      request?.alreadyMatchedByAgent === true ||
+      request?.raw?.alreadyMatchedByAgent === true ||
+      request?.status?.toLowerCase() === "matched" ||
+      request?.raw?.status?.toLowerCase() === "matched") &&
+    (grantAccessStatus === "free" || grantAccessStatus === "paid") &&
+    request?.representation_type !== "owner_representation" &&
+    request?.raw?.representation_type !== "owner_representation";
+  const shouldShowAddOpportunity = isRenterRepresentationMatched;
+  const canAddAdditionalOpportunity = shouldShowAddOpportunity;
+  const hasRequestChangedSinceLastMatch = (() => {
+    const renterUpdatedAt = request?.raw?.searchActivity?.lastRenterUpdatedAt;
+    const matchedRenterUpdatedAt = request?.raw?.matchedRenterUpdatedAt;
+    if (!renterUpdatedAt || !matchedRenterUpdatedAt) return false;
+
+    return (
+      new Date(renterUpdatedAt).getTime() >
+      new Date(matchedRenterUpdatedAt).getTime()
+    );
+  })();
+  const isOwnerRepresentationMatch =
+    request?.representation_type === "owner_representation" ||
+    request?.raw?.representation_type === "owner_representation";
+  const canAddOwnerOpportunity =
+    isOwnerRepresentationMatch && isUpcomingRequest && isListingMatched;
+  const isAccessRequestLocked =
+    request?.raw?.shareConsent === false && !isRegisteredAgentForRequest;
+  const confirmRequestScope =
+    request?.raw?.scope?.trim() || request?.scopeLabel?.trim() || "Request";
+  const isAllMarketRequest = confirmRequestScope === "All Market";
+  // const shouldDisableMatchRequest = grantAccessEnabled
+  //   ? isListingMatched
+  //   : !canRequestAccess || isRequestSentByStatus || isRequestSent;
+  const isDisabled = grantAccessEnabled
+    ? isListingMatched &&
+      !canAddAdditionalOpportunity &&
+      !canAddOwnerOpportunity &&
+      !isUpcomingRequest
+    : canRequestAccess === false || isSubmitting
+      ? true
+      : false;
+
+  // {grantAccessEnabled
+  //                 ? isListingMatched
+  //                   ? "Match Again"
+  //                   : isSubmitting
+  //                   ? "Matching..."
+  //                   : "Match Request"
+  //                 : !canRequestAccess
+  //                 ? "Request Sent"
+  //                 : isSubmitting
+  //                 ? "Sending..."
+  //                 : "Match Request"}
+
+  const handleMatchRequest = async (
+    representationType: RepresentationType = "renter_representation",
+    details: string = "",
+    additionalOpportunity: boolean = false,
+    selectedBrokerFee: string = "",
+  ) => {
+    if (!requestId || isDisabled || isSubmitting) return;
+    setStatusMessage(null);
+    const normalizedOpportunityDetails = details
+      .trim()
+      .slice(0, OPPORTUNITY_DETAILS_MAX_LENGTH);
+    if (hasRiskyOpportunityDetailsWording(normalizedOpportunityDetails)) {
+      setStatusMessage({
+        type: "error",
+        message: OPPORTUNITY_DETAILS_RISKY_WORDING_MESSAGE,
+      });
+      return;
+    }
+
+    try {
+      setIsSubmitting(true);
+      const headers: Record<string, string> = {
+        "Content-Type": "application/json",
+      };
+      if (accessToken) headers.Authorization = `Bearer ${accessToken}`;
+
+      if (grantAccessEnabled) {
+        const response = await fetch(
+          `${API_BASE_URL}/pre-market/agent/${requestId}/match`,
+          {
+            method: "POST",
+            headers,
+            body: JSON.stringify({
+              representation_type: representationType,
+              ...(additionalOpportunity ? { additionalOpportunity: true } : {}),
+                ...(normalizedOpportunityDetails
+                  ? { opportunityDetails: normalizedOpportunityDetails }
+                  : {}),
+              ...(representationType === "renter_representation" && selectedBrokerFee
+                ? { brokerFee: selectedBrokerFee }
+                : {}),
+            }),
+          },
+        );
+
+        const data = await response.json().catch(
+          () =>
+            ({}) as {
+              success?: boolean;
+              message?: string;
+              data?: {
+                registeredAgentInfo?: OwnerRepresentationRegisteredAgent | null;
+                representationSelectedAt?: string | null;
+              };
+              registeredAgentInfo?: OwnerRepresentationRegisteredAgent | null;
+              representationSelectedAt?: string | null;
+            },
+        );
+
+        if (!response.ok || data?.success === false) {
+          const errorMessage =
+            data?.message || "Match request failed. Please try again.";
+          throw new Error(errorMessage);
+        }
+
+        const matchPayload = data?.data ?? data;
+        const representationSelectedAt =
+          matchPayload?.representationSelectedAt ?? new Date().toISOString();
+
+        setRequest((prev) =>
+          prev
+            ? {
+                ...prev,
+                ownerRepresentationSelected:
+                  representationType === "owner_representation"
+                    ? true
+                    : prev.ownerRepresentationSelected,
+                representation_type:
+                  representationType === "owner_representation"
+                    ? "owner_representation"
+                    : representationType,
+                representationSelectedAt:
+                  representationType === "owner_representation"
+                    ? representationSelectedAt
+                    : prev.representationSelectedAt,
+                raw: {
+                  ...prev.raw,
+                  ...(representationType === "owner_representation"
+                    ? {
+                        ownerRepresentationSelected: true,
+                        ownerRepresentationRegisteredAgent:
+                          matchPayload?.ownerRepresentationRegisteredAgent ??
+                          matchPayload?.registeredAgentInfo ??
+                          prev.raw.ownerRepresentationRegisteredAgent,
+                        ownerRepresentationMatches:
+                          matchPayload?.ownerRepresentationMatches ??
+                          prev.raw.ownerRepresentationMatches,
+                        representation_type: representationType,
+                        representationSelectedAt,
+                      }
+                    : {
+                        listingStatus: "matched",
+                        status: "matched",
+                        grantAccessStatus: "free",
+                        representation_type: representationType,
+                        representationSelectedAt,
+                        ...(additionalOpportunity
+                          ? {}
+                          : {
+                              matchedRenterUpdatedAt:
+                                matchPayload?.matchedRenterUpdatedAt ??
+                                prev.raw.searchActivity?.lastRenterUpdatedAt ??
+                                prev.raw.matchedRenterUpdatedAt ??
+                                null,
+                            }),
+                      }),
+                },
+              }
+            : prev,
+        );
+        setStatusMessage({
+          type: "success",
+          message:
+            data?.message ||
+            (additionalOpportunity
+              ? "Additional opportunity sent."
+              : representationType === "owner_representation"
+                ? "Owner representation selection saved."
+                : "Match request created."),
+        });
+      } else {
+        const response = await fetch(
+          `${API_BASE_URL}/pre-market/grant-access/request`,
+          {
+            method: "POST",
+            headers,
+            body: JSON.stringify({
+              preMarketRequestId: requestId,
+              representation_type: representationType,
+              ...(normalizedOpportunityDetails
+                ? { opportunityDetails: normalizedOpportunityDetails }
+                : {}),
+              ...(representationType === "renter_representation" && selectedBrokerFee
+                ? { brokerFee: selectedBrokerFee }
+                : {}),
+            }),
+          },
+        );
+
+        const data = await response.json().catch(
+          () =>
+            ({}) as {
+              success?: boolean;
+              message?: string;
+              data?: {
+                ownerRepresentationMatches?: unknown;
+                ownerRepresentationRegisteredAgent?: unknown;
+              };
+              ownerRepresentationMatches?: unknown;
+              ownerRepresentationRegisteredAgent?: unknown;
+            },
+        );
+
+        if (!response.ok || data?.success === false) {
+          const errorMessage =
+            data?.message || "Match request failed. Please try again.";
+          throw new Error(errorMessage);
+        }
+
+        const matchPayload = data?.data ?? data;
+
+        setRequest((prev) =>
+          prev
+            ? {
+                ...prev,
+                ownerRepresentationSelected:
+                  representationType === "owner_representation"
+                    ? true
+                    : prev.ownerRepresentationSelected,
+                raw: {
+                  ...prev.raw,
+                  canRequestAccess: false,
+                  status: "requested",
+                  representation_type: representationType,
+                  representationSelectedAt: new Date().toISOString(),
+                  ...(representationType === "owner_representation"
+                    ? {
+                        ownerRepresentationSelected: true,
+                        ownerRepresentationRegisteredAgent:
+                          matchPayload?.ownerRepresentationRegisteredAgent ??
+                          prev.raw.ownerRepresentationRegisteredAgent,
+                        ownerRepresentationMatches:
+                          matchPayload?.ownerRepresentationMatches ??
+                          prev.raw.ownerRepresentationMatches,
+                      }
+                    : {}),
+                },
+                representation_type: representationType,
+                representationSelectedAt: new Date().toISOString(),
+              }
+            : prev,
+        );
+        setStatusMessage({
+          type: "success",
+          message: data?.message || "Access request created.",
+        });
+      }
+    } catch (err) {
+      const errorMessage =
+        err instanceof Error
+          ? err.message
+          : "Match request failed. Please try again.";
+      setStatusMessage({ type: "error", message: errorMessage });
+    } finally {
+      setIsSubmitting(false);
+    }
+  };
+
+  const navigateToAdjacentRequest = (targetHref: string | null) => {
+    if (!targetHref) return;
+    router.push(targetHref);
+  };
+
+  const backHref = isArchiveContext
+    ? "/agent/archived-requests"
+    : "/agent/dashboard";
+  const backLabel = isArchiveContext
+    ? "Archived Requests"
+    : isMatchResultsContext
+      ? "Renter Matches"
+      : "Renter Requests";
+  const handleBack = () => {
+    if (isMatchResultsContext) {
+      router.back();
+    } else {
+      router.push(backHref);
+    }
+  };
+  const opportunityDetailsCount = opportunityDetails.length;
+  const opportunityDetailsCounterClass =
+    opportunityDetailsCount >= OPPORTUNITY_DETAILS_MAX_LENGTH
+      ? "text-red-600"
+      : opportunityDetailsCount >= 280
+        ? "text-orange-400"
+        : "text-[#999999]";
+  const hasRiskyOpportunityDetails =
+    hasRiskyOpportunityDetailsWording(opportunityDetails);
+
+  /**
+   * Toggles the "All Market Offer" gate for this request from the detail
+   * page. Only meaningful for the registered agent on an active Upcoming
+   * request. Before day 7 both states are interactive. On/after day 7,
+   * turning it On sends the follow-up email and permanently locks it On.
+   */
+  const handleToggleAllMarketOffer = async (nextEnabled: boolean) => {
+    const apiRequestId = request?.raw?._id;
+    if (!apiRequestId || !isRegisteredAgentForRequest) {
+      return;
+    }
+    const rawScope = request?.raw?.scope?.trim() ?? request?.scopeLabel?.trim();
+    if (rawScope === "Upcoming (M)" || rawScope === "All Market") {
+      return;
+    }
+    setError(null);
+    setMutatingAllMarketOffer(true);
+    try {
+      const headers: Record<string, string> = {
+        "Content-Type": "application/json",
+      };
+      if (accessToken) headers.Authorization = `Bearer ${accessToken}`;
+      const response = await fetch(
+        `${API_BASE_URL}/pre-market/${apiRequestId}/all-market-offer`,
+        {
+          method: "PATCH",
+          headers,
+          body: JSON.stringify({ enabled: nextEnabled }),
+        },
+      );
+      const data = (await response.json().catch(() => ({}))) as {
+        success?: boolean;
+        message?: string;
+        data?: {
+          scope?: string;
+          searchActivity?: {
+            allMarketOfferEnabled?: boolean;
+            upcomingSearchExpansionReminderSentAt?: string | null;
+          };
+        };
+      };
+      if (!response.ok || data?.success === false) {
+        throw new Error(
+          data?.message ||
+            "We couldn't update the All Market Offer gate right now. Please try again.",
+        );
+      }
+      // Update local request state so the toggle + cards reflect the new
+      // server state immediately without a full refetch.
+      setRequest((prev) => {
+        if (!prev) return prev;
+        const nextScope =
+          data?.data?.scope ?? prev.raw?.scope ?? prev.scopeLabel;
+        const nextEnabledValue =
+          data?.data?.searchActivity?.allMarketOfferEnabled ?? nextEnabled;
+        const nextReminderSentAt =
+          data?.data?.searchActivity?.upcomingSearchExpansionReminderSentAt ??
+          prev.raw?.searchActivity?.upcomingSearchExpansionReminderSentAt ??
+          null;
+        return {
+          ...prev,
+          allMarketOfferEnabled: nextEnabledValue,
+          scopeLabel:
+            typeof nextScope === "string" ? nextScope : prev.scopeLabel,
+          isScopeUpcomingLike:
+            nextScope === "Upcoming" || nextScope === "Upcoming (M)",
+          raw: {
+            ...prev.raw,
+            scope: nextScope,
+            allMarketOfferEnabled: nextEnabledValue,
+            searchActivity: {
+              ...prev.raw?.searchActivity,
+              allMarketOfferEnabled: nextEnabledValue,
+              upcomingSearchExpansionReminderSentAt: nextReminderSentAt,
+            },
+          },
+        };
+      });
+    } catch (err) {
+      const message =
+        err instanceof Error
+          ? err.message
+          : "We couldn't update the All Market Offer gate right now. Please try again.";
+      setError(message);
+    } finally {
+      setMutatingAllMarketOffer(false);
+    }
+  };
+
+  return (
+    <section className="flex-1 bg-gray-50 h-full min-h-0 px-4 md:px-8 py-6 overflow-y-auto">
+      <div className="bg-white rounded-xl shadow-sm p-5 flex flex-wrap justify-between items-center mb-6">
+        <div className="flex items-center gap-2 text-sm text-gray-500">
+          <ArrowLeft
+            onClick={handleBack}
+            className="w-4 h-4 text-gray-600 cursor-pointer"
+          />
+          <span onClick={handleBack} className="cursor-pointer">
+            {backLabel}
+          </span>
+          <span>›</span>
+          <span className="font-medium text-gray-800">
+            {request?.requestName || "Request Details"}
+          </span>
+        </div>
+
+        {(() => {
+          const rawStatus = request?.raw?.status || request?.status;
+          const archiveLabel =
+            request?.archiveReasonLabel || request?.raw?.archiveReasonLabel;
+          if (!rawStatus && !archiveLabel) return null;
+          if (request?.isArchivedForAgent || request?.raw?.isArchivedForAgent) {
+            return (
+              <span className="px-3 py-1 rounded-full bg-amber-100 text-amber-800 text-xs font-semibold">
+                {archiveLabel || "Archived"}
+              </span>
+            );
+          }
+          if (!rawStatus) {
+            return (
+              <span className="px-3 py-1 rounded-full bg-gray-100 text-gray-600 text-xs font-semibold">
+                {archiveLabel}
+              </span>
+            );
+          }
+          const normalizedBackendStatus = rawStatus.trim().toLowerCase();
+          const backendStatusText =
+            normalizedBackendStatus === "matched"
+              ? "Matched"
+              : normalizedBackendStatus === "open"
+                ? "Open"
+                : null;
+          const normalizedAgentGrantStatus = String(
+            request?.raw?.grantAccessStatus ?? request?.raw?.status ?? "",
+          )
+            .trim()
+            .toLowerCase();
+          const matchedFromGrantStatus =
+            request?.raw?.representation_type !== "owner_representation" &&
+            ["pending", "approved", "free", "paid"].includes(
+              normalizedAgentGrantStatus,
+            );
+          const statusLabel =
+            backendStatusText ??
+            (request?.alreadyMatchedByAgent || matchedFromGrantStatus
+              ? "Matched"
+              : "Open");
+          const isMatchedByAgent = statusLabel === "Matched";
+          const statusClasses = isMatchedByAgent
+            ? "bg-green-100 text-green-700"
+            : "bg-gray-100 text-gray-600";
+
+          return (
+            <span
+              className={`px-3 py-1 rounded-full text-xs font-semibold ${statusClasses}`}
+            >
+              {statusLabel}
+            </span>
+          );
+        })()}
+      </div>
+
+      {isLoading ? (
+        <div className="bg-white rounded-xl shadow-sm p-6 text-gray-600">
+          Loading request details…
+        </div>
+      ) : error ? (
+        <div className="bg-red-50 text-red-700 border border-red-100 rounded-xl p-4 text-sm">
+          {error}
+        </div>
+      ) : !request ? (
+        <div className="bg-white rounded-xl shadow-sm p-6 text-gray-600">
+          Request not found.
+        </div>
+      ) : (
+        <>
+          {/* Summary Cards */}
+          <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-5 gap-4 mb-6">
+            <div className="bg-white rounded-xl shadow-sm p-4">
+              <p className="text-xs text-gray-500">Price Range</p>
+              <p className="text-base font-semibold text-[#0A093D]">
+                {request.priceMaxLabel}
+              </p>
+            </div>
+            <div className="bg-white rounded-xl shadow-sm p-4">
+              <p className="text-xs text-gray-500">Moving Window</p>
+              <p className="text-base font-semibold text-[#0A093D]">
+                {formatDate(movingDateRange?.earliest)} -{" "}
+                {formatDate(movingDateRange?.latest)}
+              </p>
+            </div>
+            <div className="bg-white rounded-xl shadow-sm p-4">
+              <p className="text-xs text-gray-500">Bedrooms</p>
+              <p className="text-base font-semibold text-[#0A093D]">
+                {request.bedroomsLabel}
+              </p>
+            </div>
+            <div className="bg-white rounded-xl shadow-sm p-4">
+              <p className="text-xs text-gray-500">Bathrooms</p>
+              <p className="text-base font-semibold text-[#0A093D]">
+                {request.bathroomsLabel}
+              </p>
+            </div>
+            {isRegisteredAgentForRequest
+              ? (() => {
+                  const gateValue = request.allMarketOfferEnabled !== false;
+                  const rawScope =
+                    request?.raw?.scope?.trim() ?? request?.scopeLabel?.trim();
+                  const isUpcomingM = rawScope === "Upcoming (M)";
+                  const isAllMarket = rawScope === "All Market";
+                  // Lock rules per the spec:
+                  //  - Upcoming (M): always locked (off)
+                  //  - All Market: always locked (off)
+                  //  - An email sent at day 7 never locks this toggle.
+                  // Match status does not affect the lock.
+                  const isLocked =
+                    isUpcomingM ||
+                    isAllMarket ||
+                    mutatingAllMarketOffer;
+                  const lockedReason = isUpcomingM
+                    ? "Locked once the request becomes Upcoming (M)"
+                    : isAllMarket
+                      ? "Locked once the request becomes All Market"
+                      : "Updating the All Market Offer setting.";
+                  const isDisabled = isLocked;
+                  // Force Off only for scopes that have shifted away from
+                  // plain Upcoming. A day-7 email does not alter the toggle.
+                  const displayGate =
+                    isUpcomingM || isAllMarket
+                      ? false
+                      : gateValue;
+                  return (
+                    <div
+                      className="group relative bg-white rounded-xl shadow-sm p-4 hover:z-50 focus-within:z-50"
+                      tabIndex={isDisabled ? 0 : undefined}
+                      aria-describedby={
+                        isDisabled ? "all-market-offer-tooltip" : undefined
+                      }
+                      onClick={() => {
+                        if (isDisabled) {
+                          setIsAllMarketOfferTooltipOpen((open) => !open);
+                        }
+                      }}
+                      onKeyDown={(event) => {
+                        if (
+                          isDisabled &&
+                          (event.key === "Enter" || event.key === " ")
+                        ) {
+                          event.preventDefault();
+                          setIsAllMarketOfferTooltipOpen((open) => !open);
+                        }
+                      }}
+                    >
+                      <p className="text-xs text-gray-500 leading-tight">
+                        Offer full-market agent help
+                        <br />
+                        <span className="text-[11px] text-gray-400">
+                          (day-7 follow-up email)
+                        </span>
+                      </p>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          if (isDisabled) return;
+                          void handleToggleAllMarketOffer(!gateValue);
+                        }}
+                        disabled={isDisabled}
+                        className="mt-2 inline-flex items-center gap-2 disabled:opacity-60 disabled:cursor-not-allowed"
+                        aria-label="Toggle All Market Offer"
+                        aria-describedby={
+                          isDisabled ? "all-market-offer-tooltip" : undefined
+                        }
+                      >
+                        <span
+                          className={`text-xs font-medium ${
+                            displayGate ? "text-gray-400" : "text-gray-700"
+                          }`}
+                        >
+                          Off
+                        </span>
+                        <span
+                          className={`relative inline-flex h-6 w-11 items-center rounded-full transition ${
+                            displayGate ? "bg-blue-400" : "bg-gray-300"
+                          }`}
+                        >
+                          <span
+                            className={`inline-block h-5 w-5 transform rounded-full bg-white transition ${
+                              displayGate ? "translate-x-5" : "translate-x-1"
+                            }`}
+                          />
+                        </span>
+                        <span
+                          className={`text-xs font-medium ${
+                            displayGate ? "text-emerald-700" : "text-gray-400"
+                          }`}
+                        >
+                          On
+                        </span>
+                      </button>
+                      {isDisabled ? (
+                        <div
+                          id="all-market-offer-tooltip"
+                          role="tooltip"
+                          className={`pointer-events-none invisible absolute right-2 top-full z-50 mt-2 max-w-[260px] rounded-md bg-gray-900 px-3 py-2 text-xs leading-4 text-white opacity-0 shadow-lg transition-opacity group-hover:visible group-hover:opacity-100 group-focus-within:visible group-focus-within:opacity-100 ${
+                            isAllMarketOfferTooltipOpen
+                              ? "visible opacity-100"
+                              : ""
+                          }`}
+                        >
+                          {lockedReason}
+                        </div>
+                      ) : null}
+                    </div>
+                  );
+                })()
+              : null}
+          </div>
+
+          {/* Renter Contact */}
+          {renterContact && (
+            <div className="bg-white rounded-xl shadow-sm p-6 mb-6">
+              <h2 className="text-lg font-semibold text-[#0A093D] mb-4">
+                Renter Contact
+              </h2>
+              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
+                <div className="flex items-center gap-3 border-b border-gray-100 pb-2">
+                  <User className="w-4 h-4 text-blue-600" />
+                  <div>
+                    <p className="text-xs text-gray-500">Name</p>
+                    <p className="text-gray-900 font-medium">
+                      {renterContact.name}
+                    </p>
+                  </div>
+                </div>
+                <div className="flex items-center gap-3 border-b border-gray-100 pb-2">
+                  <Mail className="w-4 h-4 text-blue-600" />
+                  <div>
+                    <p className="text-xs text-gray-500">Email</p>
+                    <p className="text-gray-900 font-medium">
+                      {renterContact.email}
+                    </p>
+                  </div>
+                </div>
+                <div className="flex items-center gap-3 border-b border-gray-100 pb-2">
+                  <Phone className="w-4 h-4 text-blue-600" />
+                  <div>
+                    <p className="text-xs text-gray-500">Phone</p>
+                    <p className="text-gray-900 font-medium">
+                      {renterContact.phone}
+                    </p>
+                  </div>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* Preferences */}
+          <div className="bg-white rounded-xl shadow-sm p-6">
+            <div className="flex flex-wrap items-center justify-between gap-3 mb-4">
+              <div className="flex items-center gap-3">
+                <h2 className="text-xl font-semibold text-[#0A093D]">
+                  Renter Preference
+                </h2>
+                <div className="text-sm text-gray-600">
+                  {request.boroughsLabel}
+                </div>
+              </div>
+            </div>
+
+            <RenterPreferenceView
+              data={renterPreferenceData}
+              preferencesLayout="topFour"
+            />
+
+            <div className="mt-6 flex flex-col gap-4">
+              {statusMessage && (
+                <p
+                  className={`text-sm ${
+                    statusMessage.type === "error"
+                      ? "text-red-600"
+                      : "text-green-600"
+                  }`}
+                >
+                  {statusMessage.message}
+                </p>
+              )}
+              <div className="grid grid-cols-[1fr_auto_1fr] items-center gap-4">
+                <button
+                  type="button"
+                  onClick={() => {
+                    if (
+                      !requestId ||
+                      isDisabled ||
+                      isAccessRequestLocked ||
+                      isSubmitting
+                    ) {
+                      return;
+                    }
+                    if (canAddOwnerOpportunity) {
+                      setSelectedRepresentationType("owner_representation");
+                    } else if (canAddAdditionalOpportunity) {
+                      setSelectedRepresentationType("renter_representation");
+                    } else {
+                      setSelectedRepresentationType("");
+                    }
+                    setOpportunityDetails("");
+                    setIsRepresentationOpen(true);
+                  }}
+                  disabled={isDisabled || isAccessRequestLocked}
+                  className={`justify-self-start px-4 py-2 rounded-lg text-sm font-medium transition disabled:opacity-60 disabled:cursor-not-allowed ${
+                    isDisabled || isAccessRequestLocked
+                      ? "bg-gray-200 text-gray-600"
+                      : "bg-blue-600 text-white hover:bg-blue-700"
+                  }`}
+                >
+                  {grantAccessEnabled
+                    ? canAddOwnerOpportunity
+                      ? "Add Opportunity"
+                      : shouldShowAddOpportunity
+                        ? hasRequestChangedSinceLastMatch
+                          ? "Match Again"
+                          : "Add Opportunity"
+                        : isListingMatched
+                          ? "Add Opportunity"
+                          : isSubmitting
+                            ? "Matching..."
+                            : "Match Request"
+                    : !canRequestAccess
+                      ? "Request Sent"
+                      : isSubmitting
+                        ? "Sending..."
+                        : "Match Request"}
+                </button>
+
+                <div className="flex items-center justify-center gap-3 justify-self-center">
+                  <button
+                    type="button"
+                    onClick={() =>
+                      navigateToAdjacentRequest(navigationTargets.previousHref)
+                    }
+                    disabled={
+                      !navigationTargets.previousHref || isResolvingNavigation
+                    }
+                    className="inline-flex items-center justify-center gap-2 rounded-xl border border-slate-200 bg-slate-50 px-4 py-2 text-sm font-semibold text-slate-600 shadow-sm transition hover:bg-slate-100 disabled:cursor-not-allowed disabled:opacity-50 md:min-w-36"
+                    aria-label="Previous request"
+                  >
+                    <ChevronLeft className="h-5 w-5 text-sky-500" />
+                    <span className="hidden sm:inline">Previous</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() =>
+                      navigateToAdjacentRequest(navigationTargets.nextHref)
+                    }
+                    disabled={
+                      !navigationTargets.nextHref || isResolvingNavigation
+                    }
+                    className="inline-flex items-center justify-center gap-2 rounded-xl border border-slate-200 bg-slate-50 px-4 py-2 text-sm font-semibold text-slate-600 shadow-sm transition hover:bg-slate-100 disabled:cursor-not-allowed disabled:opacity-50 md:min-w-36"
+                    aria-label="Next request"
+                  >
+                    <span className="hidden sm:inline">Next</span>
+                    <ChevronRight className="h-5 w-5 text-sky-500" />
+                  </button>
+                </div>
+
+                <div aria-hidden="true" />
+              </div>
+
+              {ownerRepresentationRegisteredAgent && (
+                <div className="border-t border-gray-100 pt-4">
+                  <h3 className="mb-3 text-base font-semibold text-[#0A093D]">
+                    Registered Renter Agent
+                  </h3>
+                  <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
+                    <div className="flex items-center gap-3 border-b border-gray-100 pb-2">
+                      <User className="w-4 h-4 text-blue-600" />
+                      <div>
+                        <p className="text-xs text-gray-500">Name</p>
+                        <p className="font-medium text-gray-900">
+                          {ownerRepresentationRegisteredAgent.fullName ||
+                            "Not provided"}
+                        </p>
+                      </div>
+                    </div>
+                    <div className="flex items-center gap-3 border-b border-gray-100 pb-2">
+                      <Mail className="w-4 h-4 text-blue-600" />
+                      <div>
+                        <p className="text-xs text-gray-500">Email</p>
+                        <p className="font-medium text-gray-900">
+                          {ownerRepresentationRegisteredAgent.email ||
+                            "Not provided"}
+                        </p>
+                      </div>
+                    </div>
+                    <div className="flex items-center gap-3 border-b border-gray-100 pb-2">
+                      <Phone className="w-4 h-4 text-blue-600" />
+                      <div>
+                        <p className="text-xs text-gray-500">Phone</p>
+                        <p className="font-medium text-gray-900">
+                          {ownerRepresentationRegisteredAgent.phoneNumber ||
+                            "Not provided"}
+                        </p>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              )}
+            </div>
+
+            {ownerRepresentationMatches.length > 0 && (
+              <div className="mt-6">
+                <h3 className="text-lg font-semibold text-blue-700 mb-3">
+                  Matched Owner Agents:
+                </h3>
+                <div className="space-y-1 text-sm">
+                  {ownerRepresentationMatches.map((agent, index) => (
+                    <p
+                      key={`${agent.agentId || agent.email || index}`}
+                      className={
+                        agent.isViewed ? "text-gray-500" : "text-gray-900"
+                      }
+                    >
+                      <span className="font-semibold">{index + 1}. </span>
+                      <span className="font-semibold">
+                        {agent.fullName || "Matched Agent"}
+                      </span>
+                      <span> | email: {agent.email || "N/A"}</span>
+                      <span> | number: {agent.phoneNumber || "N/A"}</span>
+                    </p>
+                  ))}
+                </div>
+              </div>
+            )}
+          </div>
+        </>
+      )}
+
+      {isRepresentationOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 px-4">
+          <div className="w-full max-w-xl rounded-2xl bg-white p-6 shadow-xl">
+            <div className="mb-5 flex items-center gap-3">
+              <Image
+                src="/Logo_1.svg"
+                alt="BeforeListed"
+                width={180}
+                height={52}
+                className="h-auto w-[160px] sm:w-[180px]"
+                priority
+              />
+            </div>
+            <h2 className="mb-5 text-xl font-semibold text-gray-900">
+              Which side would you like to represent?
+            </h2>
+            <div className="space-y-4">
+              <label className="flex cursor-pointer items-center gap-3 rounded-lg border border-gray-200 p-4 text-sm text-gray-800">
+                <input
+                  type="radio"
+                  name="representation-type"
+                  value="owner_representation"
+                  checked={
+                    selectedRepresentationType === "owner_representation"
+                  }
+                  onChange={() => {
+                    setSelectedRepresentationType("owner_representation");
+                    setOpportunityDetails("");
+                    setBrokerFee("");
+                  }}
+                  className="h-4 w-4 text-blue-600"
+                />
+                <span>I intend to represent the owner</span>
+              </label>
+              <label className="flex cursor-pointer items-center gap-3 rounded-lg border border-gray-200 p-4 text-sm text-gray-800">
+                <input
+                  type="radio"
+                  name="representation-type"
+                  value="renter_representation"
+                  checked={
+                    selectedRepresentationType === "renter_representation"
+                  }
+                  onChange={() => {
+                    setSelectedRepresentationType("renter_representation");
+                    setOpportunityDetails("");
+                  }}
+                  className="h-4 w-4 text-blue-600"
+                />
+                <span>I intend to represent the renter</span>
+              </label>
+            </div>
+            {selectedRepresentationType ? (
+              <div className="mt-5">
+                <h3 className="text-sm font-semibold text-gray-900">
+                  Add Opportunity Details
+                </h3>
+                <p className="mt-1 text-xs leading-5 text-gray-500">
+                  {opportunityDetailsHelperText[selectedRepresentationType]}
+                </p>
+                <div className="mt-3">
+                  <OpportunityDetailsTextarea
+                    key={selectedRepresentationType}
+                    representationType={selectedRepresentationType}
+                    value={opportunityDetails}
+                    onChange={setOpportunityDetails}
+                    maxLength={OPPORTUNITY_DETAILS_MAX_LENGTH}
+                    placeholder={
+                      selectedRepresentationType
+                        ? opportunityDetailsPlaceholder[
+                            selectedRepresentationType
+                          ]
+                        : opportunityDetailsPlaceholder.renter_representation
+                    }
+                    ariaInvalid={hasRiskyOpportunityDetails}
+                    style={{ minHeight: "5.75rem" }}
+                    className={`resize-none rounded-lg border px-3 py-2 text-sm leading-5 text-gray-800 outline-none transition focus:ring-2 ${
+                      hasRiskyOpportunityDetails
+                        ? "border-red-300 focus:border-red-500 focus:ring-red-100"
+                        : "border-gray-200 text-gray-800 focus:border-blue-500 focus:ring-blue-100"
+                    }`}
+                  />
+                  <div className="mt-1 flex justify-end">
+                    <span
+                      className={`text-xs ${opportunityDetailsCounterClass}`}
+                    >
+                      {opportunityDetailsCount} /{" "}
+                      {OPPORTUNITY_DETAILS_MAX_LENGTH}
+                    </span>
+                  </div>
+                </div>
+                {hasRiskyOpportunityDetails ? (
+                  <p className="mt-2 text-xs leading-5 text-red-600">
+                    {OPPORTUNITY_DETAILS_RISKY_WORDING_MESSAGE}
+                  </p>
+                ) : null}
+              </div>
+            ) : null}
+            {selectedRepresentationType === "renter_representation" ? (
+              <label className="mt-4 block text-sm font-semibold text-gray-800">
+                Broker Fee
+                <select value={brokerFee} onChange={(event) => setBrokerFee(event.target.value)} className="mt-2 block w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm font-normal text-gray-800 focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-100">
+                  <option value="">Select Broker Fee</option>
+                  {BROKER_FEE_OPTIONS.map((option) => <option key={option} value={option}>{option}</option>)}
+                </select>
+              </label>
+            ) : null}
+            <div className="mt-6 flex flex-col-reverse gap-3 sm:flex-row sm:justify-end">
+              <button
+                type="button"
+                onClick={() => {
+                  setIsRepresentationOpen(false);
+                  setSelectedRepresentationType("");
+                  setOpportunityDetails("");
+                  setBrokerFee("");
+                }}
+                className="px-4 py-2 rounded-lg text-sm font-medium bg-gray-100 text-gray-700 hover:bg-gray-200 transition"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  if (
+                    !selectedRepresentationType ||
+                    hasRiskyOpportunityDetails
+                  ) {
+                    return;
+                  }
+
+                  setIsRepresentationOpen(false);
+                  if (selectedRepresentationType === "owner_representation") {
+                    handleMatchRequest(
+                      "owner_representation",
+                      opportunityDetails,
+                      canAddOwnerOpportunity,
+                    );
+                    return;
+                  }
+
+                  setIsConfirmChecked(false);
+                  setIsConfirmOpen(true);
+                }}
+                disabled={
+                  !selectedRepresentationType ||
+                  hasRiskyOpportunityDetails ||
+                  isSubmitting
+                }
+                className="px-4 py-2 rounded-lg text-sm font-medium bg-blue-600 text-white hover:bg-blue-700 transition disabled:opacity-60 disabled:cursor-not-allowed"
+              >
+                Confirm
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {isConfirmOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 px-4">
+          <div className="w-full max-w-2xl rounded-2xl bg-white p-6 shadow-xl">
+            <h2 className="text-xl font-semibold text-gray-900 mb-4">
+              Confirm Match Request &ndash; {confirmRequestScope}
+            </h2>
+            {isAllMarketRequest ? (
+              <div className="space-y-3 text-sm text-gray-700 mb-4">
+                <p>
+                  By proceeding, you confirm that you intend to represent this
+                  renter with full-service, full-market representation,
+                  including agent guidance, landlord and building screening,
+                  scheduling, coordination, and ongoing support throughout the
+                  rental process.
+                </p>
+                <p>
+                  You will verify the renter&rsquo;s Corcoran agency disclosures
+                  and client registration prior to taking any action on the
+                  renter&rsquo;s behalf.
+                </p>
+              </div>
+            ) : (
+              <>
+                <p className="text-sm text-gray-700 mb-3">
+                  By proceeding, you confirm that:
+                </p>
+                <ul className="text-sm text-gray-700 space-y-2 mb-4 list-disc pl-5">
+                  <li>
+                    You will verify the renter&rsquo;s Corcoran agency
+                    disclosures and client registration prior to taking any
+                    action on the renter&rsquo;s behalf.
+                  </li>
+                  <li>
+                    Any information about the apartment being presented to this
+                    renter arose from tenant-initiated outreach or follow-up
+                    inquiries made in response to renter requests.
+                  </li>
+                  <li>
+                    You have not been retained by the owner to procure a tenant
+                    or market this apartment.
+                  </li>
+                  <li>
+                    To the best of your knowledge, this apartment was not
+                    publicly advertised on StreetEasy, Zillow, or the REBNY
+                    Listing Service (RLS) at the time of this match.
+                  </li>
+                  <li>
+                    If you are the agent identified in the renter’s disclosure,
+                    you may pursue this opportunity on the renter’s behalf.
+                  </li>
+                  <li>
+                    If you are not identified in the renter’s disclosure, you
+                    will not take steps on the renter’s behalf until you are
+                    properly identified through an additional agency disclosure
+                    signed by the renter.
+                  </li>
+                </ul>
+              </>
+            )}
+            <label className="flex items-start gap-2 text-sm text-gray-700 mb-6">
+              <input
+                type="checkbox"
+                checked={isConfirmChecked}
+                onChange={(e) => setIsConfirmChecked(e.target.checked)}
+                className="mt-1 h-4 w-4 text-blue-600"
+              />
+              <span className="font-semibold">
+                {isAllMarketRequest
+                  ? "Confirm Full-Service Full-Market Representation"
+                  : "I confirm the above and approve proceeding with this match."}
+              </span>
+            </label>
+            <div className="flex flex-col-reverse gap-3 sm:flex-row sm:justify-end">
+              <button
+                type="button"
+                onClick={() => setIsConfirmOpen(false)}
+                className="px-4 py-2 rounded-lg text-sm font-medium bg-gray-100 text-gray-700 hover:bg-gray-200 transition"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  if (!isConfirmChecked || hasRiskyOpportunityDetails) return;
+                  setIsConfirmOpen(false);
+                  handleMatchRequest(
+                    "renter_representation",
+                    opportunityDetails,
+                    canAddAdditionalOpportunity && !hasRequestChangedSinceLastMatch,
+                    brokerFee,
+                  );
+                }}
+                disabled={
+                  !isConfirmChecked ||
+                  hasRiskyOpportunityDetails ||
+                  isSubmitting
+                }
+                className="px-4 py-2 rounded-lg text-sm font-medium bg-blue-600 text-white hover:bg-blue-700 transition disabled:opacity-60 disabled:cursor-not-allowed"
+              >
+                {isSubmitting ? "Sending..." : "Confirm & Send"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+    </section>
+  );
+}

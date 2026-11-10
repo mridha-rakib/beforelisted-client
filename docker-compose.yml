@@ -1,0 +1,14 @@
+services:
+  frontend:
+    platform: ${DOCKER_DEFAULT_PLATFORM:-linux/amd64}
+    container_name: penny-more-frontend
+    build:
+      context: .
+      dockerfile: Dockerfile
+      network: host
+      args:
+        NEXT_PUBLIC_API_BASE_URL: ${NEXT_PUBLIC_API_BASE_URL}
+        NEXT_PUBLIC_STRIPE_PUBLISHABLE_KEY: ${NEXT_PUBLIC_STRIPE_PUBLISHABLE_KEY:-}
+    ports:
+      - "3030:3030"
+    restart: on-failure:3
