@@ -1132,8 +1132,9 @@ export default function PreMarketListingPage() {
       <SuccessModal
         isOpen={isSuccessModalOpen}
         onClose={() => setIsSuccessModalOpen(false)}
-        redirectPath="/renter/saved-requests"
-        buttonLabel="Go to Saved Requests"
+        redirectPath="/renter/moving-discounts"
+        buttonLabel="Go to My Dashboard"
+        showMovingDiscountsMessage
       />
     </section>
   );
