@@ -29,11 +29,31 @@ const suspiciousPatterns = [
   /\bETH_RPC_URL\b/i,
 ];
 
+const expectedPostcssConfig = `const config = {
+  plugins: {
+    "@tailwindcss/postcss": {},
+  },
+};
+
+export default config;
+`;
+
 for (const file of ["postcss.config.mjs", "eslint.config.mjs"]) {
   const fullPath = resolve(root, file);
-  if (!existsSync(fullPath)) continue;
+  if (!existsSync(fullPath)) {
+    if (file === "postcss.config.mjs") {
+      failures.push(`${file} is missing; the expected Tailwind configuration is required.`);
+    }
+    continue;
+  }
 
   const content = readFileSync(fullPath, "utf8");
+  if (
+    file === "postcss.config.mjs" &&
+    content.replace(/\r\n/g, "\n") !== expectedPostcssConfig
+  ) {
+    failures.push(`${file} differs from the approved Tailwind configuration.`);
+  }
   if (statSync(fullPath).size > 20_000) {
     failures.push(`${file} is unexpectedly large and requires review.`);
   }

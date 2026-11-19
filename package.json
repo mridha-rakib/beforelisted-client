@@ -5,11 +5,11 @@
   "license": "UNLICENSED",
   "packageManager": "pnpm@9.15.0",
   "scripts": {
-    "dev": "node init && WATCHPACK_POLLING=true next dev --webpack --hostname 127.0.0.1",
-    "dev:webpack": "node init && WATCHPACK_POLLING=true next dev --webpack --hostname 127.0.0.1",
-    "dev:3030": "node init && WATCHPACK_POLLING=true next dev --webpack --hostname 127.0.0.1 --port 3030",
-    "build": "node init && npm run security:check && next build --webpack",
-    "start": "node init && next start --hostname 127.0.0.1 --port 3030",
+    "dev": "WATCHPACK_POLLING=true next dev --webpack --hostname 127.0.0.1",
+    "dev:webpack": "WATCHPACK_POLLING=true next dev --webpack --hostname 127.0.0.1",
+    "dev:3030": "WATCHPACK_POLLING=true next dev --webpack --hostname 127.0.0.1 --port 3030",
+    "build": "npm run security:check && next build --webpack",
+    "start": "next start --hostname 127.0.0.1 --port 3030",
     "lint": "eslint",
     "typecheck": "tsc --noEmit",
     "security:check": "node scripts/security-check.mjs"
