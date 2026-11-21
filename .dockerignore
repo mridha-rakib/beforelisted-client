@@ -9,3 +9,8 @@ coverage
 dist
 build
 *.log
+
+# Exclude local configuration and private certificate files from the build context.
+**/.env
+**/.env.*
+**/*.pem
