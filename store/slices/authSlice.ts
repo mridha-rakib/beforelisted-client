@@ -63,6 +63,7 @@ export interface AgentProfile {
   title?: string | null;
   licenseNumber?: string;
   brokerageName?: string;
+  secondaryEmail?: string;
   isActive?: boolean;
   emailSubscriptionEnabled?: boolean;
   acceptingRequests?: boolean;

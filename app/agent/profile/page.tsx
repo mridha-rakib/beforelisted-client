@@ -217,6 +217,12 @@ export default function AgentProfile() {
                 {userInfo?.email || "Not provided"}
               </p>
             </div>
+            <div className="sm:col-span-2">
+              <p className="text-gray-500 text-sm">Secondary Email</p>
+              <p className="font-medium text-gray-900 border-b border-gray-200 pb-1">
+                {profile?.secondaryEmail || "Not provided"}
+              </p>
+            </div>
           </div>
 
           {/* Change Password */}
