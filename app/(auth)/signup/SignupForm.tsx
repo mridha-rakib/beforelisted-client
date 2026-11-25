@@ -6,6 +6,8 @@ import { useRouter, useSearchParams } from "next/navigation";
 import Link from "next/link";
 import { ChevronDown, Eye, EyeOff, UsersRound } from "lucide-react";
 import { getSavedReferralCode, saveReferralCode } from "@/lib/referralCode";
+import { isValidRegistrationPhone } from "@/lib/registrationPhone";
+import { isValidRenterRegistrationName } from "@/lib/registrationName";
 
 const API_BASE_URL = process.env.NEXT_PUBLIC_API_BASE_URL;
 const INACTIVE_REGISTRATION_LINK_CODE = "REGISTRATION_LINK_INACTIVE";
@@ -34,7 +36,7 @@ type ApiResponsePayload = {
   message?: string;
   errorCode?: string;
   errors?: ApiErrorDetail[];
-  data?: ReferralDisplay;
+  data?: ReferralDisplay & { verificationEmailConfirmed?: boolean };
 };
 
 const isApiResponsePayload = (value: unknown): value is ApiResponsePayload =>
@@ -207,11 +209,16 @@ export default function SignupForm({ role }: { role: SignupRole }) {
     const trimmedFullName = formData.fullName.trim();
     const hasFullNameSpace = /\s+/.test(trimmedFullName);
 
-    if (!trimmedFullName || !hasFullNameSpace) {
+    if (isRenter ? !isValidRenterRegistrationName(formData.fullName) : !trimmedFullName || !hasFullNameSpace) {
       setStatusMessage({
         type: "error",
         message: "Please enter your full name.",
       });
+      return;
+    }
+
+    if (isRenter && !isValidRegistrationPhone(formData.phoneNumber)) {
+      setStatusMessage({ type: "error", message: "Please enter a valid phone number." });
       return;
     }
 
@@ -345,7 +352,8 @@ export default function SignupForm({ role }: { role: SignupRole }) {
         type: "success",
         message: data.message || "Renter registered successfully.",
       });
-      router.push(`/otp-verify?email=${encodeURIComponent(email)}`);
+      const deliveryNotice = data.data?.verificationEmailConfirmed === false ? "&delivery=failed" : "";
+      router.push(`/otp-verify?email=${encodeURIComponent(email)}${deliveryNotice}`);
     } catch (error) {
       const message =
         error instanceof Error

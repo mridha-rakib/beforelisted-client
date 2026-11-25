@@ -4,6 +4,8 @@ import { Suspense, useEffect, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import Image from "next/image";
 import Link from "next/link";
+import { isValidRegistrationPhone } from "@/lib/registrationPhone";
+import { isValidRenterRegistrationName } from "@/lib/registrationName";
 
 const API_BASE_URL = process.env.NEXT_PUBLIC_API_BASE_URL;
 
@@ -51,6 +53,14 @@ function SignupPageInner() {
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setStatusMessage(null);
+    if (!isValidRenterRegistrationName(formData.fullName)) {
+      setStatusMessage({ type: "error", message: "Please enter your first and last name." });
+      return;
+    }
+    if (!isValidRegistrationPhone(formData.phoneNumber)) {
+      setStatusMessage({ type: "error", message: "Please enter a valid phone number." });
+      return;
+    }
     if (!questionnaire) {
       setStatusMessage({
         type: "error",
@@ -165,6 +175,7 @@ function SignupPageInner() {
             />
             <input
               type="tel"
+              required
               placeholder="Phone no"
               value={formData.phoneNumber}
               onChange={(e) =>

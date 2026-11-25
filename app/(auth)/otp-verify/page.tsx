@@ -15,7 +15,9 @@ function OtpVerifyPageInner() {
   const [statusMessage, setStatusMessage] = useState<{
     type: "success" | "error";
     message: string;
-  } | null>(null);
+  } | null>(() => searchParams.get("delivery") === "failed"
+    ? { type: "error", message: "We could not confirm delivery of your verification code. If it does not arrive, select Resend again." }
+    : null);
   const [loading, setLoading] = useState(false);
   const [resendLoading, setResendLoading] = useState(false);
   const inputRefs = useRef<Array<HTMLInputElement | null>>([]);
